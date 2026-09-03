@@ -601,4 +601,7 @@ export const zh: I18nDictionary = {
   "attachment.cancel": "❌ 取消附加",
   "attachment.cancelled": "❌ 已取消附加",
   "attachment.invalid": "⚠️ 附加的文件已不可用，将不带该文件发送消息。",
+  "local_command.empty_output": "The command produced no output.",
+  "local_command.failed": "Command failed with exit code {exitCode}: {stderr}",
+  "local_command.timeout": "The command timed out.",
 };

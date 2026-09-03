@@ -649,6 +649,9 @@ export const en = {
   "attachment.cancel": "❌ Cancel attachment",
   "attachment.cancelled": "❌ Attachment cancelled",
   "attachment.invalid": "⚠️ The attached file is no longer available. Sending the message without it.",
+  "local_command.empty_output": "The command produced no output.",
+  "local_command.failed": "Command failed with exit code {exitCode}: {stderr}",
+  "local_command.timeout": "The command timed out.",
 } as const;
 
 export type I18nKey = keyof typeof en;

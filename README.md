@@ -200,6 +200,20 @@ For this to work, the console OpenCode instance must be started on the same port
 - The setup wizard asks for language first
 - You can change locale later with `BOT_LOCALE`
 
+### Local JSON Commands
+
+Trusted local commands live in `<appHome>/local-commands/`, one JSON file per command. The filename becomes the command name, so `quota.json` appears as `/quota` in Telegram’s command menu after the bot restarts:
+
+```json
+{
+  "description": "Show provider quota limits",
+  "exec": "node /home/you/bin/quota.js",
+  "allowWhenBusy": true
+}
+```
+
+`description` and `exec` are required; `description` is a single line of at most 256 characters. Extra fields are ignored. Commands run through the platform shell with the bot’s OS permissions and inherited environment, from `<appHome>`; treat every file in this directory as trusted code. They receive no Telegram text or attachments, never invoke OpenCode, time out after 30 seconds, and are not listed in `/help` or `/commands`. `allowWhenBusy` defaults to `false`; it permits a command while OpenCode is working but never during an active bot interaction.
+
 ### Environment Variables
 
 Configuration can be provided through process environment variables or an `.env` file. Process environment values take precedence. When installed via npm, the configuration wizard handles any missing required values and stores the generated `.env` file in your platform's app data directory:

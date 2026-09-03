@@ -9,6 +9,8 @@ import {
 } from "../../opencode/ready-refresh.js";
 import { flushSettings, loadSettings } from "../stores/settings-store.js";
 import { scheduledTaskRuntime } from "../services/scheduled-task-runtime-service.js";
+import { LocalCommandRegistry } from "../services/local-command-registry.js";
+import { BUILT_IN_COMMAND_NAMES } from "../../bot/commands/definitions.js";
 import { reconcileStoredModelSelection } from "../services/model-selection-service.js";
 import { getBotVersion } from "../../runtime/bot-version.js";
 import { getRuntimeMode } from "../../runtime/mode.js";
@@ -102,7 +104,11 @@ export async function startBotApp(): Promise<void> {
   await loadSettings();
   await reconcileStoredModelSelection();
   registerOpenCodeReadyRefreshHandler();
-  const bot = createBot();
+  const localCommandRegistry = await LocalCommandRegistry.load({
+    directoryPath: runtimePaths.localCommandsDirPath,
+    builtInCommands: BUILT_IN_COMMAND_NAMES,
+  });
+  const bot = createBot(localCommandRegistry);
   await scheduledTaskRuntime.initialize(
     bot,
     createScheduledTaskDeliverySender(bot.api, config.telegram.allowedUserId),

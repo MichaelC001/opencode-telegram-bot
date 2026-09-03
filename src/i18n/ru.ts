@@ -659,4 +659,7 @@ export const ru: I18nDictionary = {
   "attachment.cancel": "❌ Отменить вложение",
   "attachment.cancelled": "❌ Вложение отменено",
   "attachment.invalid": "⚠️ Прикреплённый файл больше недоступен. Отправляю сообщение без него.",
+  "local_command.empty_output": "Команда не вернула вывод.",
+  "local_command.failed": "Команда завершилась с кодом {exitCode}: {stderr}",
+  "local_command.timeout": "Время выполнения команды истекло.",
 };

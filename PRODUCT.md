@@ -161,6 +161,7 @@ Model picker behavior:
 - [x] Live pinned session status in chat (project, model, context usage, changed files)
 - [x] In-chat controls for model, agent, variant, and context
 - [x] Built-in and custom command catalog access (`/commands`)
+- [x] Trusted local JSON commands from the persistent application home, executed without OpenCode or model tokens
 - [x] Skills catalog access (`/skills`)
 - [x] Scheduled task creation flow (`/task`), remembering the agent selected at creation and showing it (alongside the model) in the task confirmation and task details
 - [x] Scheduled task runtime execution with deferred Telegram delivery

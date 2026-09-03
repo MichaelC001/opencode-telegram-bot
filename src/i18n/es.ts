@@ -677,4 +677,7 @@ export const es: I18nDictionary = {
   "attachment.cancelled": "❌ Adjunto cancelado",
   "attachment.invalid":
     "⚠️ El archivo adjunto ya no está disponible. Enviando el mensaje sin él.",
+  "local_command.empty_output": "The command produced no output.",
+  "local_command.failed": "Command failed with exit code {exitCode}: {stderr}",
+  "local_command.timeout": "The command timed out.",
 };

@@ -11,12 +11,13 @@ import type {
 import { foregroundSessionState } from "../../app/managers/foreground-session-state-manager.js";
 import { attachManager } from "../../app/managers/attach-manager.js";
 import { QUEUED_PROMPT_BUTTON_TEXT_PATTERN } from "../message-patterns.js";
+import type { LocalCommandRegistry } from "../../app/services/local-command-registry.js";
 
 const BUSY_ALLOWED_COMMANDS = ["/abort", "/detach", "/status", "/help", "/opencode_stop"] as const;
 const BUSY_ALLOWED_COMMAND_SET = new Set<string>(BUSY_ALLOWED_COMMANDS);
 
-function isBusyAllowedCommand(command?: string): boolean {
-  return Boolean(command && BUSY_ALLOWED_COMMAND_SET.has(command));
+function isBusyAllowedCommand(command: string | undefined, localCommandRegistry?: LocalCommandRegistry): boolean {
+  return Boolean(command && (BUSY_ALLOWED_COMMAND_SET.has(command) || localCommandRegistry?.allowsWhenBusy(command)));
 }
 
 function allowsBusyInteraction(kind: InteractionKind | undefined): boolean {
@@ -150,7 +151,10 @@ function isAllowedTaskCallback(ctx: Context, state: InteractionState): boolean {
   );
 }
 
-export function resolveInteractionGuardDecision(ctx: Context): GuardDecision {
+export function resolveInteractionGuardDecision(
+  ctx: Context,
+  localCommandRegistry?: LocalCommandRegistry,
+): GuardDecision {
   const state = interactionManager.getSnapshot();
   const { inputType, command } = classifyIncomingInput(ctx);
   const isBusy = foregroundSessionState.isBusy() || attachManager.isBusy();
@@ -162,7 +166,10 @@ export function resolveInteractionGuardDecision(ctx: Context): GuardDecision {
 
   if (isBusy) {
     if (inputType === "command") {
-      if (isBusyAllowedCommand(command)) {
+      if (state && localCommandRegistry?.has(command)) {
+        return createBusyBlockDecision(inputType, state, "command_not_allowed", command);
+      }
+      if (isBusyAllowedCommand(command, localCommandRegistry)) {
         return createAllowDecision(inputType, state, command, true);
       }
 

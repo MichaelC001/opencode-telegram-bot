@@ -632,4 +632,7 @@ export const ar: I18nDictionary = {
   "attachment.cancel": "❌ إلغاء الإرفاق",
   "attachment.cancelled": "❌ تم إلغاء الإرفاق",
   "attachment.invalid": "⚠️ الملف المرفق لم يعد متاحًا. سيتم إرسال الرسالة بدونه.",
+  "local_command.empty_output": "The command produced no output.",
+  "local_command.failed": "Command failed with exit code {exitCode}: {stderr}",
+  "local_command.timeout": "The command timed out.",
 };

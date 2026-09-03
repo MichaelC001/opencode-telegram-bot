@@ -9,6 +9,7 @@ import {
 import { logger } from "../../utils/logger.js";
 import { t } from "../../i18n/index.js";
 import { getIncomingPrompt } from "../handlers/rich-message-handler.js";
+import type { LocalCommandRegistry } from "../../app/services/local-command-registry.js";
 
 function getInteractionBlockedMessage(
   reason: BlockReason | undefined,
@@ -89,12 +90,16 @@ function getInteractionBlockedMessage(
   }
 }
 
-export async function interactionGuardMiddleware(ctx: Context, next: NextFunction): Promise<void> {
-  let decision = resolveInteractionGuardDecision(ctx);
+export async function interactionGuardMiddleware(
+  ctx: Context,
+  next: NextFunction,
+  localCommandRegistry?: LocalCommandRegistry,
+): Promise<void> {
+  let decision = resolveInteractionGuardDecision(ctx, localCommandRegistry);
 
   if (!decision.allow && decision.busy) {
     await reconcileForegroundBusyState();
-    decision = resolveInteractionGuardDecision(ctx);
+    decision = resolveInteractionGuardDecision(ctx, localCommandRegistry);
   }
 
   if (decision.allow) {

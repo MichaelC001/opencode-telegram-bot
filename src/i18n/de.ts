@@ -679,4 +679,7 @@ export const de: I18nDictionary = {
   "attachment.cancelled": "❌ Anhang entfernt",
   "attachment.invalid":
     "⚠️ Die angehängte Datei ist nicht mehr verfügbar. Die Nachricht wird ohne sie gesendet.",
+  "local_command.empty_output": "The command produced no output.",
+  "local_command.failed": "Command failed with exit code {exitCode}: {stderr}",
+  "local_command.timeout": "The command timed out.",
 };

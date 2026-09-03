@@ -659,4 +659,7 @@ export const ko: I18nDictionary = {
   "attachment.cancel": "❌ 첨부 취소",
   "attachment.cancelled": "❌ 첨부가 취소되었습니다",
   "attachment.invalid": "⚠️ 첨부한 파일을 더 이상 사용할 수 없습니다. 파일 없이 메시지를 보냅니다.",
+  "local_command.empty_output": "The command produced no output.",
+  "local_command.failed": "Command failed with exit code {exitCode}: {stderr}",
+  "local_command.timeout": "The command timed out.",
 };
