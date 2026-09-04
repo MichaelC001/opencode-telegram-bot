@@ -1,5 +1,10 @@
 import type { Context } from "grammy";
-import { MAX_QUEUED_PROMPTS, promptQueue } from "../../app/managers/prompt-queue-manager.js";
+import {
+  MAX_QUEUED_PROMPTS,
+  MAX_QUEUED_MEDIA_BYTES,
+  promptQueue,
+  type QueuedPromptInput,
+} from "../../app/managers/prompt-queue-manager.js";
 import type { IncomingPrompt } from "../../app/types/prompt.js";
 import { buildExternalUserInputNotification } from "../../app/services/external-user-input-service.js";
 import { isForegroundBusy } from "../../app/services/run-control-service.js";
@@ -50,11 +55,20 @@ export function shouldSuggestPromptQueue(input: IncomingPrompt): boolean {
   return !getPromptQueueEnabled() && isQueueablePrompt(input);
 }
 
+export function canQueueMediaPrompt(ctx: Context): boolean {
+  const message = ctx.message;
+  return Boolean(
+    getPromptQueueEnabled() &&
+      message &&
+      (message.voice || message.audio || message.photo?.length || message.document),
+  );
+}
+
 /**
- * Queues a text prompt that arrived while the session was busy.
+ * Queues a prepared prompt that arrived while the session was busy.
  * Returns false when queueing does not apply, so the caller keeps its old behaviour.
  */
-export async function tryEnqueuePrompt(ctx: Context, input: IncomingPrompt): Promise<boolean> {
+export async function tryEnqueuePrompt(ctx: Context, input: QueuedPromptInput): Promise<boolean> {
   if (!getPromptQueueEnabled() || !ctx.chat || !isQueueablePrompt(input)) {
     return false;
   }
@@ -64,6 +78,11 @@ export async function tryEnqueuePrompt(ctx: Context, input: IncomingPrompt): Pro
   if (promptQueue.isFull()) {
     logger.info(`[PromptQueue] Rejected prompt: queue is full (max=${MAX_QUEUED_PROMPTS})`);
     await replyWithKeyboard(ctx, t("queue.full", { max: String(MAX_QUEUED_PROMPTS) }));
+    return true;
+  }
+
+  if (!promptQueue.canAcceptMedia(input.mediaBytes ?? 0)) {
+    await replyWithKeyboard(ctx, t("queue.media_limit", { maxSizeMb: formatQueuedMediaLimit() }));
     return true;
   }
 
@@ -80,6 +99,44 @@ export async function tryEnqueuePrompt(ctx: Context, input: IncomingPrompt): Pro
     t("queue.added", { count: String(promptQueue.size()), max: String(MAX_QUEUED_PROMPTS) }),
   );
   return true;
+}
+
+export async function tryEnqueuePromptIfBusy(
+  ctx: Context,
+  input: QueuedPromptInput,
+): Promise<boolean> {
+  return isForegroundBusy() && tryEnqueuePrompt(ctx, input);
+}
+
+/**
+ * Rejects a busy queued-media candidate before handlers download or encode it.
+ * Media sizes are raw Telegram file_size values, not expanded data-URI bytes.
+ */
+export async function rejectQueuedMediaBeforePreparation(
+  ctx: Context,
+  mediaBytes: number | undefined,
+): Promise<boolean> {
+  if (!isForegroundBusy() || !getPromptQueueEnabled() || !ctx.chat) {
+    return false;
+  }
+  if (promptQueue.isFull()) {
+    await replyWithKeyboard(ctx, t("queue.full", { max: String(MAX_QUEUED_PROMPTS) }));
+    return true;
+  }
+  if (
+    typeof mediaBytes !== "number" ||
+    !Number.isSafeInteger(mediaBytes) ||
+    mediaBytes < 0 ||
+    !promptQueue.canAcceptMedia(mediaBytes)
+  ) {
+    await replyWithKeyboard(ctx, t("queue.media_limit", { maxSizeMb: formatQueuedMediaLimit() }));
+    return true;
+  }
+  return false;
+}
+
+function formatQueuedMediaLimit(): string {
+  return String(MAX_QUEUED_MEDIA_BYTES / (1024 * 1024));
 }
 
 /**
@@ -108,7 +165,7 @@ export async function dispatchNextQueuedPrompt(): Promise<void> {
     const ctx = queuedPromptContext;
     const deps = promptDeps;
 
-    const notification = buildExternalUserInputNotification(item.text);
+    const notification = buildExternalUserInputNotification(item.displayText);
     if (notification && ctx.chat) {
       try {
         const keyboard = keyboardManager.getKeyboard();
@@ -130,7 +187,9 @@ export async function dispatchNextQueuedPrompt(): Promise<void> {
     );
 
     try {
-      const dispatched = await processUserPrompt(ctx, item, deps);
+      const dispatched = await processUserPrompt(ctx, item, deps, {
+        ...(item.responseMode ? { responseMode: item.responseMode } : {}),
+      });
       if (!dispatched) {
         logger.warn(`[PromptQueue] Queued prompt was not dispatched: id=${item.id}`);
       }

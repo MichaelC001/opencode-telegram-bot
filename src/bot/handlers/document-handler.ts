@@ -15,6 +15,10 @@ import { t } from "../../i18n/index.js";
 import type { FilePartInput, Model } from "@opencode-ai/sdk/v2";
 import { flushPendingPrompt } from "./message-merger.js";
 import { createIncomingPrompt, type IncomingPrompt } from "../../app/types/prompt.js";
+import {
+  rejectQueuedMediaBeforePreparation,
+  tryEnqueuePromptIfBusy,
+} from "./prompt-queue-dispatch.js";
 
 export interface DocumentHandlerDeps extends ProcessPromptDeps {
   downloadFile?: (
@@ -52,6 +56,23 @@ export async function handleDocumentMessage(
   const caption = ctx.message.caption || "";
   const mimeType = doc.mime_type || "";
   const filename = doc.file_name || "document";
+  const submitPrompt = async (
+    text: string,
+    fileParts: FilePartInput[] = [],
+    mediaBytes: number | undefined = 0,
+  ): Promise<void> => {
+    const input = createIncomingPrompt(text, { fileParts });
+    if (
+      await tryEnqueuePromptIfBusy(ctx, {
+        ...input,
+        displayText: caption.trim() || filename,
+        mediaBytes,
+      })
+    ) {
+      return;
+    }
+    await processPrompt(ctx, input, deps);
+  };
 
   try {
     if (isTextMimeType(mimeType, filename)) {
@@ -66,6 +87,9 @@ export async function handleDocumentMessage(
       }
 
       await ctx.reply(t("bot.file_downloading"));
+      if (await rejectQueuedMediaBeforePreparation(ctx, doc.file_size)) {
+        return;
+      }
       const downloadedFile = await downloadFile(ctx.api, doc.file_id);
 
       const textContent = downloadedFile.buffer.toString("utf-8");
@@ -76,7 +100,7 @@ export async function handleDocumentMessage(
         `[Document] Sending text file (${downloadedFile.buffer.length} bytes, ${filename}) as prompt`,
       );
 
-      await processPrompt(ctx, createIncomingPrompt(promptWithFile), deps);
+      await submitPrompt(promptWithFile);
       return;
     }
 
@@ -91,12 +115,15 @@ export async function handleDocumentMessage(
         await ctx.reply(t("bot.photo_model_no_image"));
 
         if (caption.trim().length > 0) {
-          await processPrompt(ctx, createIncomingPrompt(caption), deps);
+          await submitPrompt(caption);
         }
         return;
       }
 
       await ctx.reply(t("bot.file_downloading"));
+      if (await rejectQueuedMediaBeforePreparation(ctx, doc.file_size)) {
+        return;
+      }
       const downloadedFile = await downloadFile(ctx.api, doc.file_id);
 
       const dataUri = toDataUri(downloadedFile.buffer, mimeType);
@@ -112,7 +139,7 @@ export async function handleDocumentMessage(
         `[Document] Sending image (${downloadedFile.buffer.length} bytes, ${filename}, ${mimeType}) with prompt`,
       );
 
-      await processPrompt(ctx, createIncomingPrompt(caption, { fileParts: [filePart] }), deps);
+      await submitPrompt(caption, [filePart], doc.file_size);
       return;
     }
 
@@ -140,6 +167,9 @@ export async function handleDocumentMessage(
             `[Document] Model doesn't support PDF input, delegating document to DOC_EXTRACTOR_URL`,
           );
           await ctx.reply(t("bot.file_downloading"));
+          if (await rejectQueuedMediaBeforePreparation(ctx, doc.file_size)) {
+            return;
+          }
           const downloadedFile = await downloadFile(ctx.api, doc.file_id);
 
           try {
@@ -148,13 +178,13 @@ export async function handleDocumentMessage(
             logger.info(
               `[Document] Sending extracted document text from ${filename} (${result.text.length} chars) as prompt`,
             );
-            await processPrompt(ctx, createIncomingPrompt(promptWithFile), deps);
+            await submitPrompt(promptWithFile, [], doc.file_size);
           } catch (extractErr) {
             const errMsg = extractErr instanceof Error ? extractErr.message : String(extractErr);
             logger.error(`[Document] Document extraction failed: ${errMsg}`);
             await ctx.reply(t("bot.document_extraction_error"));
             if (caption.trim().length > 0) {
-              await processPrompt(ctx, createIncomingPrompt(caption), deps);
+              await submitPrompt(caption);
             }
           }
         } else {
@@ -163,13 +193,16 @@ export async function handleDocumentMessage(
           );
           await ctx.reply(t("bot.model_no_pdf"));
           if (caption.trim().length > 0) {
-            await processPrompt(ctx, createIncomingPrompt(caption), deps);
+            await submitPrompt(caption);
           }
         }
         return;
       }
 
       await ctx.reply(t("bot.file_downloading"));
+      if (await rejectQueuedMediaBeforePreparation(ctx, doc.file_size)) {
+        return;
+      }
       const downloadedFile = await downloadFile(ctx.api, doc.file_id);
 
       const dataUri = toDataUri(downloadedFile.buffer, mimeType);
@@ -185,7 +218,7 @@ export async function handleDocumentMessage(
         `[Document] Sending document (${downloadedFile.buffer.length} bytes, ${filename}, ${mimeType}) with prompt`,
       );
 
-      await processPrompt(ctx, createIncomingPrompt(caption, { fileParts: [filePart] }), deps);
+      await submitPrompt(caption, [filePart], doc.file_size);
       return;
     }
 

@@ -13,6 +13,10 @@ import {
   type MediaGroupHandlerDeps,
 } from "../../../src/bot/handlers/media-group-handler.js";
 import { t } from "../../../src/i18n/index.js";
+import { promptQueue } from "../../../src/app/managers/prompt-queue-manager.js";
+import { MAX_QUEUED_MEDIA_BYTES } from "../../../src/app/managers/prompt-queue-manager.js";
+import { foregroundSessionState } from "../../../src/app/managers/foreground-session-state-manager.js";
+import * as settingsStore from "../../../src/app/stores/settings-store.js";
 
 function createBaseContext(message: Record<string, unknown>): {
   ctx: Context;
@@ -59,6 +63,7 @@ function createPhotoContext(options: {
   messageId: number;
   smallFileId: string;
   largeFileId: string;
+  fileSize?: number;
   caption?: string;
 }): { ctx: Context; replyMock: ReturnType<typeof vi.fn> } {
   return createBaseContext({
@@ -76,6 +81,7 @@ function createPhotoContext(options: {
         file_unique_id: `${options.largeFileId}-unique`,
         width: 1280,
         height: 960,
+        file_size: options.fileSize ?? 1024,
       },
     ],
   });
@@ -136,6 +142,8 @@ describe("bot/handlers/media-group", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     flushPendingPromptMock.mockClear();
+    promptQueue.__resetForTests();
+    foregroundSessionState.__resetForTests();
   });
 
   afterEach(() => {
@@ -185,6 +193,67 @@ describe("bot/handlers/media-group", () => {
         }),
       ],
     );
+  });
+
+  it("queues an album as one item while the agent is busy", async () => {
+    vi.spyOn(settingsStore, "getPromptQueueEnabled").mockReturnValue(true);
+    foregroundSessionState.markBusy("session-1", "/repo");
+    const first = createPhotoContext({
+      messageId: 20,
+      smallFileId: "small-1",
+      largeFileId: "large-1",
+      caption: "Compare these photos",
+    });
+    const second = createPhotoContext({
+      messageId: 21,
+      smallFileId: "small-2",
+      largeFileId: "large-2",
+    });
+    const { deps, processPromptMock } = createDeps();
+    const handler = new MediaGroupAttachmentHandler(deps, { debounceMs: 10_000 });
+
+    await addToHandler(handler, first.ctx);
+    await addToHandler(handler, second.ctx);
+    await handler.flushAll();
+
+    expect(processPromptMock).not.toHaveBeenCalled();
+    expect(promptQueue.size()).toBe(1);
+    expect(promptQueue.list()[0]).toEqual(
+      expect.objectContaining({
+        displayText: "Compare these photos",
+        fileParts: [
+          expect.objectContaining({ filename: "photo-20.jpg" }),
+          expect.objectContaining({ filename: "photo-21.jpg" }),
+        ],
+      }),
+    );
+  });
+
+  it("rejects an oversized busy album before downloading any item", async () => {
+    vi.spyOn(settingsStore, "getPromptQueueEnabled").mockReturnValue(true);
+    foregroundSessionState.markBusy("session-1", "/repo");
+    const first = createPhotoContext({
+      messageId: 20,
+      smallFileId: "small-1",
+      largeFileId: "large-1",
+      fileSize: MAX_QUEUED_MEDIA_BYTES,
+    });
+    const second = createPhotoContext({
+      messageId: 21,
+      smallFileId: "small-2",
+      largeFileId: "large-2",
+      fileSize: 1,
+    });
+    const { deps, downloadMock, processPromptMock } = createDeps();
+    const handler = new MediaGroupAttachmentHandler(deps, { debounceMs: 10_000 });
+
+    await addToHandler(handler, first.ctx);
+    await addToHandler(handler, second.ctx);
+    await handler.flushAll();
+
+    expect(downloadMock).not.toHaveBeenCalled();
+    expect(processPromptMock).not.toHaveBeenCalled();
+    expect(promptQueue.mediaSize()).toBe(0);
   });
 
   it("uses the largest photo from each media group item", async () => {
