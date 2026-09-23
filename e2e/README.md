@@ -14,13 +14,16 @@ a human does first.
 | `.env` | Test config you edit. Copied into the test home on every launch |
 | `.env.example` | Template |
 | `run-test-bot.ps1` / `.sh` | Starts the bot against an isolated home |
-| `stop-test-bot.ps1` / `.sh` | Stops the test bot, its OpenCode server and the fault proxy |
+| `stop-test-bot.ps1` / `.sh` | Stops the test bot, its OpenCode server and the fault or forward proxy |
 | `fault-proxy.mjs` | Fault-injection proxy in front of the Telegram Bot API |
 | `fault-proxy.md` | How to launch and drive the fault proxy |
+| `forward-proxy.mjs` | Local SOCKS / HTTP(S) forward proxy for `TELEGRAM_PROXY_URL` checks |
+| `forward-proxy-test-only.crt` / `.key` | Public test certificate of the `https` forward proxy |
 | `probes.js` | DOM probes and confirmed Telegram Web selectors |
 | `scenarios/` | Regression scenarios the subagent runs before any feature check |
 | `.tmp/e2e/home/` | Runtime state: `settings.json`, `logs/` |
 | `.tmp/e2e/fault-proxy/` | Fault proxy call logs and pid file |
+| `.tmp/e2e/forward-proxy/` | Forward proxy connection logs and pid file |
 | `.tmp/e2e/browser-profile/` | Persistent Telegram Web login |
 | `e2e/output/` | Screenshots and console logs the subagent produces |
 
@@ -82,7 +85,8 @@ When done:
 The subagent runs this itself at the end of every session. It only stops what
 the test setup started: the OpenCode server on the configured test port, bot
 processes whose pid appears in a `.tmp/e2e/home/logs` file name, and the fault
-proxy named in `.tmp/e2e/fault-proxy/proxy.pid`.
+or forward proxy named in `.tmp/e2e/fault-proxy/proxy.pid` or
+`.tmp/e2e/forward-proxy/proxy.pid`.
 
 The `.sh` scripts need the executable bit once they are committed:
 `git update-index --chmod=+x e2e/run-test-bot.sh e2e/stop-test-bot.sh`
@@ -102,6 +106,99 @@ with per-method counters. Without the flag nothing changes.
 
 Launch, control API, rule shape and log format:
 [`fault-proxy.md`](./fault-proxy.md).
+
+## Forward proxy
+
+[`forward-proxy.mjs`](./forward-proxy.mjs) is a local forward proxy for checking how
+the bot reaches Telegram through `TELEGRAM_PROXY_URL`. It needs no external proxy
+server and no dependency. Start the stand with one scheme:
+
+```powershell
+.\e2e\run-test-bot.ps1 -ForwardProxy socks5h     # Windows
+```
+
+```bash
+./e2e/run-test-bot.sh --forward-proxy socks5h    # macOS / Linux
+```
+
+The launcher starts the proxy on `127.0.0.1:8766` and gives the bot process, and
+only it, `TELEGRAM_PROXY_URL=<scheme>://127.0.0.1:8766`. Both addresses are printed
+at startup. The proxy stops together with the bot, including when the bot fails
+to start; `stop-test-bot` stops it as well. The mode is refused before anything
+starts when combined with `-FaultProxy`, or when `TELEGRAM_PROXY_URL` or
+`TELEGRAM_API_ROOT` is set in `e2e/.env` or the environment. An unknown scheme is
+refused with the supported list. Schemes are lowercase only.
+
+| Scheme | Protocol the proxy speaks | Destination names resolved by | Destinations accepted |
+| --- | --- | --- | --- |
+| `socks` | SOCKS5, no auth | the proxy | name, IPv4, IPv6 |
+| `socks4` | SOCKS4 | the bot | IPv4 only |
+| `socks4a` | SOCKS4a | the proxy | name, IPv4 |
+| `socks5` | SOCKS5, no auth | the bot | IPv4, IPv6 |
+| `socks5h` | SOCKS5, no auth | the proxy | name, IPv4, IPv6 |
+| `http` | HTTP `CONNECT` | the proxy | name, IPv4, IPv6 |
+| `https` | HTTP `CONNECT` over TLS | the proxy | name, IPv4, IPv6 |
+
+Only `CONNECT` is implemented: no SOCKS BIND or UDP, no proxy authentication, and no
+plain (non-`CONNECT`) HTTP forwarding. A `socks4` bot that resolves the Telegram host
+to IPv6 fails before it reaches the proxy, because SOCKS4 carries IPv4 only.
+
+**Diagnostics.** Each launch writes `.tmp/e2e/forward-proxy/connections-<time>.jsonl`,
+one record per event:
+
+- `tunnel-opened`: the protocol the client used and the destination it asked for;
+- `tunnel-closed`: bytes each way and the duration;
+- `rejected`: the reason. `protocol-mismatch` names the `expected` protocol and the
+  one `detected` from the client's first byte. A name sent to `socks4`/`socks5`,
+  whose clients must resolve names themselves, is a mismatch as well. Other reasons:
+  `tls-handshake-failed`, `upstream-error`, `unsupported-method`,
+  `unsupported-command`, `unsupported-auth`, `bad-request`.
+
+The log never holds payloads, request paths or the bot token. Bot API traffic stays
+TLS end to end between the bot and Telegram inside the tunnel. The proxy's stdout
+goes to `proxy-output.log` in the same folder on macOS / Linux.
+
+**Test certificate.** The `https` scheme presents
+`forward-proxy-test-only.crt`, a self-signed leaf for `127.0.0.1` only. It is not a
+CA, so its committed private key cannot sign anything else. The launcher trusts it
+through `NODE_EXTRA_CA_CERTS` for the test-bot process only; a value you had there
+is replaced for that launch and restored afterwards. The OpenCode server the test
+bot starts inherits the variable, as it inherits `TELEGRAM_PROXY_URL`. The pair was
+generated once, valid until 2126, with:
+
+```bash
+cat > cert.cnf <<'EOF'
+[req]
+distinguished_name = dn
+x509_extensions = ext
+prompt = no
+[dn]
+CN = opencode-telegram-bot e2e forward proxy (TEST ONLY)
+[ext]
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature
+extendedKeyUsage = serverAuth
+subjectAltName = IP:127.0.0.1
+EOF
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 36500 \
+  -config cert.cnf -keyout forward-proxy-test-only.key -out forward-proxy-test-only.crt
+```
+
+A config file rather than `-addext`: the latter keeps the default `CA:TRUE` next to
+it. Both files then get a plain-text header marking them as a test credential.
+
+**Reproducing issue #229 (OTB-109).** Until OTB-109 lands, the bot downloads incoming
+photos and documents through an HTTP proxy client even when the proxy URL is SOCKS.
+With any SOCKS scheme, text and voice work, but a photo, a document or a media group
+fails, and the log shows a `protocol-mismatch` with `detected: "http"`. With `http`
+and `https` everything passes. After the fix, every scheme passes.
+
+**Automated tests.** `tests/e2e/forward-proxy.test.ts` runs every scheme through
+the bot's own proxy agents against a local upstream. `tests/e2e/run-test-bot.test.ts`
+covers the launcher's up-front refusals. Launcher behaviour is tested by spawning the
+real launcher from a temporary copy of `e2e/` with a fake `.env`, the PowerShell
+launcher on Windows and the shell launcher elsewhere. Its checks stay written inline
+in each launcher, and every test asserts its specific message.
 
 ## Maintenance
 
