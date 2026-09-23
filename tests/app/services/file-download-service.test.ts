@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Api } from "grammy";
 import { Agent as HttpsAgent } from "https";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import { SocksProxyAgent } from "socks-proxy-agent";
 import {
   toDataUri,
   formatFileSize,
@@ -315,6 +317,70 @@ describe("downloadTelegramFile reverse-proxy wiring", () => {
     const agent = (init as { agent?: unknown } | undefined)?.agent;
     expect(agent).toBeInstanceOf(HttpsAgent);
     expect((agent as HttpsAgent).options.family).toBe(4);
+  });
+
+  async function downloadAgent(proxyUrl: string, forceIpv4 = false): Promise<unknown> {
+    vi.stubEnv("TELEGRAM_PROXY_URL", proxyUrl);
+    if (forceIpv4) {
+      vi.stubEnv("TELEGRAM_FORCE_IPV4", "true");
+    }
+    const fetchMock = makeFetchStub();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { downloadTelegramFile } = await loadDownloadModule();
+    await downloadTelegramFile(makeApiStub(), "fid");
+
+    const call = defined(fetchMock.mock.calls[0]);
+    const [, init] = call;
+    return (init as { agent?: unknown } | undefined)?.agent;
+  }
+
+  it("uses a SOCKS agent for a socks5h proxy URL", async () => {
+    const agent = await downloadAgent("socks5h://127.0.0.1:1080");
+
+    expect(agent).toBeInstanceOf(SocksProxyAgent);
+    expect(agent).not.toBeInstanceOf(HttpsProxyAgent);
+  });
+
+  it("uses a SOCKS agent for socks4 and socks5 proxy URLs", async () => {
+    const socks4 = await downloadAgent("socks4://127.0.0.1:1080");
+    const socks5 = await downloadAgent("socks5://127.0.0.1:1080");
+
+    expect(socks4).toBeInstanceOf(SocksProxyAgent);
+    expect(socks5).toBeInstanceOf(SocksProxyAgent);
+    expect(socks4).not.toBeInstanceOf(HttpsProxyAgent);
+    expect(socks5).not.toBeInstanceOf(HttpsProxyAgent);
+  });
+
+  it("keeps an HTTP proxy agent for http and https proxy URLs", async () => {
+    const httpAgent = await downloadAgent("http://proxy.example.com:8080");
+    const httpsAgent = await downloadAgent("https://proxy.example.com:8443");
+
+    expect(httpAgent).toBeInstanceOf(HttpsProxyAgent);
+    expect(httpsAgent).toBeInstanceOf(HttpsProxyAgent);
+    expect(httpAgent).not.toBeInstanceOf(SocksProxyAgent);
+    expect(httpsAgent).not.toBeInstanceOf(SocksProxyAgent);
+  });
+
+  it("passes a SOCKS proxy URL with userinfo through unrewritten", async () => {
+    const agent = await downloadAgent("socks5h://user:secret@proxy.example.com:1080");
+
+    expect(agent).toBeInstanceOf(SocksProxyAgent);
+    expect((agent as SocksProxyAgent).proxy).toEqual(
+      expect.objectContaining({
+        host: "proxy.example.com",
+        port: 1080,
+        userId: "user",
+        password: "secret",
+      }),
+    );
+  });
+
+  it("prefers the proxy agent over the IPv4 agent when both are configured", async () => {
+    const agent = await downloadAgent("socks5h://127.0.0.1:1080", true);
+
+    expect(agent).toBeInstanceOf(SocksProxyAgent);
+    expect(agent).not.toBeInstanceOf(HttpsAgent);
   });
 
   it("retries a download when the TLS connection fails before it is established", async () => {

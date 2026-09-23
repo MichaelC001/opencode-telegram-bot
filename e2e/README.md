@@ -187,11 +187,9 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 
 A config file rather than `-addext`: the latter keeps the default `CA:TRUE` next to
 it. Both files then get a plain-text header marking them as a test credential.
 
-**Reproducing issue #229 (OTB-109).** Until OTB-109 lands, the bot downloads incoming
-photos and documents through an HTTP proxy client even when the proxy URL is SOCKS.
-With any SOCKS scheme, text and voice work, but a photo, a document or a media group
-fails, and the log shows a `protocol-mismatch` with `detected: "http"`. With `http`
-and `https` everything passes. After the fix, every scheme passes.
+**File downloads.** Every supported scheme carries text, voice, photos, documents,
+and media groups. A `protocol-mismatch` in the connection log means the bot used the
+wrong proxy client for that scheme.
 
 **Automated tests.** `tests/e2e/forward-proxy.test.ts` runs every scheme through
 the bot's own proxy agents against a local upstream. `tests/e2e/run-test-bot.test.ts`
