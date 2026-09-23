@@ -6,6 +6,13 @@ vi.mock("../../../src/app/services/busy-reconciliation-service.js", () => ({
   setResponseStreamerForReconciliation: vi.fn(),
 }));
 
+const streamingMode = vi.hoisted(() => ({ value: "edit" as "edit" | "draft" }));
+
+vi.mock("../../../src/app/stores/settings-store.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../src/app/stores/settings-store.js")>()),
+  getResponseStreamingMode: () => streamingMode.value,
+}));
+
 import { SessionRuntimeState } from "../../../src/bot/events/session-runtime-state.js";
 
 const SESSIONS = ["session-1", "session-2"] as const;
@@ -130,5 +137,112 @@ describe("bot/events/session-runtime-state", () => {
     for (const sessionId of SESSIONS) {
       expect(describeSession(runtime, sessionId)).toEqual(EMPTY);
     }
+  });
+});
+
+describe("bot/events/session-runtime-state text sent early", () => {
+  let runtime: SessionRuntimeState;
+
+  function streamText(messageId: string, text: string): void {
+    runtime.recordAssistantText("session-1", messageId, text);
+    runtime.enqueueAssistantResponse("session-1", messageId, {
+      parts: [{ blocks: [], fallbackText: text, source: "plain" }],
+    });
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    streamingMode.value = "draft";
+    runtime = createRuntime();
+  });
+
+  afterEach(() => {
+    runtime.reset("test_cleanup");
+    streamingMode.value = "edit";
+    vi.useRealTimers();
+  });
+
+  it("selects only draft replies with text that was not sent yet", () => {
+    streamText("message-1", "Analysis");
+    streamingMode.value = "edit";
+    streamText("message-2", "Edited reply");
+
+    expect(runtime.getUndeliveredAssistantDrafts("session-1")).toEqual([
+      { messageId: "message-1", text: "Analysis" },
+    ]);
+    expect(runtime.getUndeliveredAssistantDrafts("session-2")).toEqual([]);
+
+    runtime.markAssistantTextDelivered("session-1", "message-1", "Analysis");
+    expect(runtime.getUndeliveredAssistantDrafts("session-1")).toEqual([]);
+
+    runtime.recordAssistantText("session-1", "message-1", "Analysis\n\nMore");
+    expect(runtime.getUndeliveredAssistantDrafts("session-1")).toEqual([
+      { messageId: "message-1", text: "Analysis\n\nMore" },
+    ]);
+  });
+
+  it("strips the text sent early and keeps a reply that no longer extends it whole", () => {
+    runtime.markAssistantTextDelivered("session-1", "message-1", "Analysis");
+
+    expect(runtime.stripDeliveredAssistantText("session-1", "message-1", "Analysis\n\nMore")).toBe(
+      "\n\nMore",
+    );
+    expect(runtime.stripDeliveredAssistantText("session-1", "message-1", "Analysis\n\n")).toBe("");
+    expect(runtime.stripDeliveredAssistantText("session-1", "message-1", "Rewritten")).toBe(
+      "Rewritten",
+    );
+    expect(runtime.stripDeliveredAssistantText("session-1", "message-2", "Other")).toBe("Other");
+  });
+
+  it("hands back the previous mark so a failed early send can restore it", () => {
+    expect(
+      runtime.markAssistantTextDelivered("session-1", "message-1", "Analysis"),
+    ).toBeUndefined();
+    expect(runtime.markAssistantTextDelivered("session-1", "message-1", "Analysis more")).toBe(
+      "Analysis",
+    );
+
+    runtime.markAssistantTextDelivered("session-1", "message-1", undefined);
+    expect(runtime.stripDeliveredAssistantText("session-1", "message-1", "Analysis")).toBe(
+      "Analysis",
+    );
+  });
+
+  it("keeps the records through an early draft completion and drops them at the real one", async () => {
+    streamText("message-1", "Analysis");
+    runtime.markAssistantTextDelivered("session-1", "message-1", "Analysis");
+
+    await runtime.completeAssistantDraftEarly("session-1", "message-1");
+    streamingMode.value = "edit";
+    expect(runtime.getAssistantStreamMode("session-1", "message-1")).toBe("draft");
+    expect(runtime.stripDeliveredAssistantText("session-1", "message-1", "Analysis")).toBe("");
+
+    await runtime.completeAssistantResponse("session-1", "message-1");
+    expect(runtime.stripDeliveredAssistantText("session-1", "message-1", "Analysis")).toBe(
+      "Analysis",
+    );
+  });
+
+  it.each([
+    [
+      "the reply is cleared",
+      (state: SessionRuntimeState) =>
+        state.clearAssistantResponse("session-1", "message-1", "test"),
+    ],
+    [
+      "the session is cleared",
+      (state: SessionRuntimeState) => state.clearSession("session-1", "test"),
+    ],
+    ["all output is cleared", (state: SessionRuntimeState) => state.clearAllOutput("test")],
+  ])("drops the records when %s", (_label, clear) => {
+    streamText("message-1", "Analysis");
+    runtime.markAssistantTextDelivered("session-1", "message-1", "Analy");
+
+    clear(runtime);
+
+    expect(runtime.getUndeliveredAssistantDrafts("session-1")).toEqual([]);
+    expect(runtime.stripDeliveredAssistantText("session-1", "message-1", "Analysis")).toBe(
+      "Analysis",
+    );
   });
 });

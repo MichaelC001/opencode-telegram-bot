@@ -6,10 +6,15 @@ import {
   showPermissionRequest,
   syncPermissionInteractionState,
 } from "../../menus/permission-menu.js";
+import { keepAssistantDraftsBeforePrompt } from "./assistant-response-handler.js";
 import { isCompactProgressMode, type EventHandlerDeps } from "./handler-context.js";
 
 type InteractionDeps = EventHandlerDeps<
-  "interactionManager" | "permissionManager" | "questionManager" | "summaryAggregator"
+  | "interactionManager"
+  | "keyboardManager"
+  | "permissionManager"
+  | "questionManager"
+  | "summaryAggregator"
 >;
 
 /**
@@ -38,6 +43,7 @@ async function presentQuestion(
     runtime.toolMessageBatcher.flushSession(sessionId, "question_asked"),
     runtime.toolCallStreamer.flushSession(sessionId, "question_asked"),
   ]);
+  await keepAssistantDraftsBeforePrompt(deps, sessionId);
 
   // Decide and open the slot in one synchronous step: a permission or a
   // reset may have landed during the flushes.
@@ -98,6 +104,7 @@ async function presentPermission(
     runtime.toolMessageBatcher.flushSession(sessionId, "permission_asked"),
     runtime.toolCallStreamer.flushSession(sessionId, "permission_asked"),
   ]);
+  await keepAssistantDraftsBeforePrompt(deps, followedSessionId);
 
   // Decide in one synchronous step: a poll or a reset may have landed during the flushes.
   if (permissionManager.getDropReason(request, generation)) {

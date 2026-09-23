@@ -24,6 +24,8 @@ import {
   type EventHandlerDeps,
 } from "./handler-context.js";
 
+type KeepAssistantDraftsDeps = EventHandlerDeps<"keyboardManager">;
+
 type AssistantResponseDeps = EventHandlerDeps<
   | "assistantRunState"
   | "externalUserInputSuppressionManager"
@@ -69,6 +71,69 @@ async function completeThinkingStream(
   }
 }
 
+/**
+ * Sends the drafted text of a session's replies as real messages before a
+ * question or permission prompt: a draft vanishes once the bot sends anything
+ * else, and the reply's own completion waits for the prompt to be answered.
+ */
+export function keepAssistantDraftsBeforePrompt(
+  deps: KeepAssistantDraftsDeps,
+  sessionId: string,
+): Promise<void> {
+  const { runtime, policy } = deps;
+
+  return runtime.enqueueCompletionTask(sessionId, async () => {
+    const destination = policy.getDestination(sessionId);
+    if (!destination || !policy.isForegroundSession(sessionId)) {
+      return;
+    }
+
+    for (const { messageId, text } of runtime.getUndeliveredAssistantDrafts(sessionId)) {
+      const undeliveredText = runtime.stripDeliveredAssistantText(sessionId, messageId, text);
+      // Marked before the send: a partial landing meanwhile must not start a
+      // fresh draft of the same text, which completion would send again.
+      const previousDeliveredText = runtime.markAssistantTextDelivered(sessionId, messageId, text);
+      try {
+        await finalizeAssistantResponse({
+          sessionId,
+          messageId,
+          messageText: undeliveredText,
+          responseStreamer: {
+            complete: (completeSessionId, completeMessageId, payload, options) =>
+              runtime.completeAssistantDraftEarly(
+                completeSessionId,
+                completeMessageId,
+                payload,
+                options,
+              ),
+          },
+          // The prompt flushes tool output itself before showing up.
+          flushPendingServiceMessages: async () => {},
+          prepareStreamingPayload: prepareAssistantFinalStreamingPayload,
+          renderFinalParts: (partText) => renderAssistantFinalPartsSafe(partText),
+          getReplyKeyboard: () => getReplyKeyboard(deps),
+          sendRenderedPart: async (part, options) => {
+            await runtime.delivery.sendRenderedPart(
+              destination,
+              part,
+              options as Parameters<typeof runtime.delivery.sendRenderedPart>[2],
+            );
+          },
+        });
+        logger.debug(
+          `[Bot] Kept assistant draft before a prompt: session=${sessionId}, message=${messageId}`,
+        );
+      } catch (error) {
+        runtime.markAssistantTextDelivered(sessionId, messageId, previousDeliveredText);
+        logger.error(
+          `[Bot] Failed to keep assistant draft before a prompt: session=${sessionId}, message=${messageId}`,
+          error,
+        );
+      }
+    }
+  });
+}
+
 /** Streamed replies, their completion, thinking and external user input. */
 export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): void {
   const { runtime, policy, summaryAggregator } = deps;
@@ -82,7 +147,10 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
       runtime.compactProgressStreamer.updateResponding(sessionId);
     }
 
-    const preparedStreamPayload = prepareAssistantStreamingPayload(messageText);
+    runtime.recordAssistantText(sessionId, messageId, messageText);
+    const preparedStreamPayload = prepareAssistantStreamingPayload(
+      runtime.stripDeliveredAssistantText(sessionId, messageId, messageText),
+    );
     if (!preparedStreamPayload) {
       return;
     }
@@ -133,7 +201,8 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
         await finalizeAssistantResponse({
           sessionId,
           messageId,
-          messageText,
+          // Text sent early, above a question or permission prompt, is not sent again.
+          messageText: runtime.stripDeliveredAssistantText(sessionId, messageId, messageText),
           responseStreamer: {
             complete: (completeSessionId, completeMessageId, payload, options) =>
               runtime.completeAssistantResponse(

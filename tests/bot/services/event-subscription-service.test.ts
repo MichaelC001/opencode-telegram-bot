@@ -13,6 +13,12 @@ import type { AppContainer } from "../../../src/app/bootstrap/app-container.js";
 const mocked = vi.hoisted(() => ({
   subscribeToEvents: vi.fn(),
   stopEventListening: vi.fn(),
+  sendTtsResponseForSession: vi.fn(),
+}));
+
+vi.mock("../../../src/bot/handlers/tts-response-handler.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../src/bot/handlers/tts-response-handler.js")>()),
+  sendTtsResponseForSession: mocked.sendTtsResponseForSession,
 }));
 
 vi.mock("../../../src/opencode/events.js", () => ({
@@ -150,12 +156,13 @@ function emitPermissionAsked(
   summaryAggregator: { processEvent(event: Event): void },
   requestID: string,
   patterns: string[] = ["D:/shared/*"],
+  sessionID = "session-1",
 ): void {
   summaryAggregator.processEvent({
     type: "permission.asked",
     properties: {
       id: requestID,
-      sessionID: "session-1",
+      sessionID,
       permission: "external_directory",
       patterns,
       metadata: {},
@@ -425,6 +432,8 @@ describe("bot/services/event-subscription-service", () => {
     mocked.subscribeToEvents.mockReset();
     mocked.stopEventListening.mockReset();
     mocked.subscribeToEvents.mockResolvedValue(undefined);
+    mocked.sendTtsResponseForSession.mockReset();
+    mocked.sendTtsResponseForSession.mockResolvedValue(false);
 
     const settingsStore = await import("../../../src/app/stores/settings-store.js");
     settingsStore.__resetSettingsForTests();
@@ -1165,6 +1174,257 @@ describe("bot/services/event-subscription-service", () => {
     expect(defined(api.sendMessage.mock.calls[0])[2]).toEqual({ disable_notification: true });
     expect(defined(api.sendMessage.mock.calls[1]?.[1])).toContain("test-provider/test-model");
     expect(api.sendMessageDraft).not.toHaveBeenCalled();
+  });
+
+  describe("draft text before a question or permission prompt", () => {
+    function sentMessageTexts(api: FakeBotApi): string[] {
+      return api.sendMessage.mock.calls.map((call) => String(call[1]));
+    }
+
+    function indexOfSent(api: FakeBotApi, fragment: string): number {
+      return sentMessageTexts(api).findIndex((text) => text.includes(fragment));
+    }
+
+    function countSent(api: FakeBotApi, text: string): number {
+      return sentMessageTexts(api).filter((sentText) => sentText === text).length;
+    }
+
+    async function streamDraft(
+      api: FakeBotApi,
+      summaryAggregator: { processEvent(event: Event): void },
+      text: string,
+    ): Promise<void> {
+      emitAssistantTextPart(summaryAggregator, text);
+      await vi.waitFor(
+        () => {
+          expect(api.sendMessageDraft).toHaveBeenCalled();
+        },
+        { timeout: 3000 },
+      );
+    }
+
+    it("sends the drafted text as a silent message above the question and not again at completion", async () => {
+      const { api, summaryAggregator } = await setupService(false, {
+        responseStreamingMode: "draft",
+      });
+
+      await streamDraft(api, summaryAggregator, "Analysis");
+      emitQuestionAsked(summaryAggregator, "q1");
+
+      await vi.waitFor(() => {
+        expect(indexOfSent(api, "Which option for q1?")).toBeGreaterThanOrEqual(0);
+      });
+      const textIndex = indexOfSent(api, "Analysis");
+      expect(textIndex).toBeGreaterThanOrEqual(0);
+      expect(textIndex).toBeLessThan(indexOfSent(api, "Which option for q1?"));
+      expect(defined(api.sendMessage.mock.calls[textIndex])[2]?.disable_notification).toBe(true);
+
+      emitAssistantCompleted(summaryAggregator);
+      await vi.waitFor(() => {
+        expect(mocked.sendTtsResponseForSession).toHaveBeenCalledTimes(1);
+      });
+      expect(countSent(api, "Analysis")).toBe(1);
+      expect(defined(mocked.sendTtsResponseForSession.mock.calls[0])[0].text).toBe("Analysis");
+    });
+
+    it("sends the drafted text above a permission request", async () => {
+      const { api, summaryAggregator } = await setupService(false, {
+        responseStreamingMode: "draft",
+      });
+
+      await streamDraft(api, summaryAggregator, "Analysis");
+      emitPermissionAsked(summaryAggregator, "perm-1");
+
+      await vi.waitFor(() => {
+        expect(indexOfSent(api, "D:/shared/*")).toBeGreaterThanOrEqual(0);
+      });
+      expect(indexOfSent(api, "Analysis")).toBeGreaterThanOrEqual(0);
+      expect(indexOfSent(api, "Analysis")).toBeLessThan(indexOfSent(api, "D:/shared/*"));
+
+      emitAssistantCompleted(summaryAggregator);
+      await vi.waitFor(() => {
+        expect(mocked.sendTtsResponseForSession).toHaveBeenCalledTimes(1);
+      });
+      expect(countSent(api, "Analysis")).toBe(1);
+    });
+
+    it("does not send the text again when it is updated while the early send is in flight", async () => {
+      const { api, summaryAggregator } = await setupService(false, {
+        responseStreamingMode: "draft",
+      });
+
+      // No preview went out yet, so the early send renders the text afresh.
+      emitAssistantTextPart(summaryAggregator, "Analysis");
+      let releaseEarlySend: () => void = () => {};
+      api.sendMessage.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseEarlySend = () => resolve({ message_id: 100 });
+          }),
+      );
+      emitPermissionAsked(summaryAggregator, "perm-1");
+      await vi.waitFor(() => {
+        expect(countSent(api, "Analysis")).toBe(1);
+      });
+
+      // A trailing-whitespace update adds nothing worth sending on its own.
+      const draftSendsBefore = api.sendMessageDraft.mock.calls.length;
+      emitAssistantTextPart(summaryAggregator, "Analysis\n");
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      releaseEarlySend();
+      await vi.waitFor(() => {
+        expect(indexOfSent(api, "D:/shared/*")).toBeGreaterThanOrEqual(0);
+      });
+      expect(api.sendMessageDraft.mock.calls.length).toBe(draftSendsBefore);
+
+      emitAssistantCompleted(summaryAggregator);
+      await vi.waitFor(() => {
+        expect(mocked.sendTtsResponseForSession).toHaveBeenCalledTimes(1);
+      });
+      expect(sentMessageTexts(api).filter((text) => text.includes("Analysis"))).toHaveLength(1);
+    });
+
+    it("sends the text even when no draft preview went out before the prompt", async () => {
+      const { api, summaryAggregator } = await setupService(false, {
+        responseStreamingMode: "draft",
+      });
+
+      emitAssistantTextPart(summaryAggregator, "Analysis");
+      emitQuestionAsked(summaryAggregator, "q1");
+
+      await vi.waitFor(() => {
+        expect(indexOfSent(api, "Which option for q1?")).toBeGreaterThanOrEqual(0);
+      });
+      expect(indexOfSent(api, "Analysis")).toBeGreaterThanOrEqual(0);
+      expect(indexOfSent(api, "Analysis")).toBeLessThan(indexOfSent(api, "Which option for q1?"));
+    });
+
+    it("sends only the text written after the prompt when the message completes", async () => {
+      const { api, summaryAggregator } = await setupService(false, {
+        responseStreamingMode: "draft",
+      });
+
+      await streamDraft(api, summaryAggregator, "Analysis");
+      emitQuestionAsked(summaryAggregator, "q1");
+      await vi.waitFor(() => {
+        expect(indexOfSent(api, "Which option for q1?")).toBeGreaterThanOrEqual(0);
+      });
+
+      emitAssistantTextPart(summaryAggregator, "Analysis\n\nMore after the answer");
+      emitAssistantCompleted(summaryAggregator);
+
+      await vi.waitFor(() => {
+        expect(mocked.sendTtsResponseForSession).toHaveBeenCalledTimes(1);
+      });
+      const texts = sentMessageTexts(api);
+      expect(texts.filter((text) => text.includes("Analysis"))).toEqual(["Analysis"]);
+      expect(texts.some((text) => text.includes("More after the answer"))).toBe(true);
+      expect(defined(mocked.sendTtsResponseForSession.mock.calls[0])[0].text).toBe(
+        "Analysis\n\nMore after the answer",
+      );
+    });
+
+    it("sends nothing extra when no text preceded the prompt", async () => {
+      const { api, summaryAggregator } = await setupService(false, {
+        responseStreamingMode: "draft",
+      });
+
+      emitQuestionAsked(summaryAggregator, "q1");
+
+      await vi.waitFor(() => {
+        expect(indexOfSent(api, "Which option for q1?")).toBeGreaterThanOrEqual(0);
+      });
+      expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it("still shows the prompt and sends the text once at completion when the early send fails", async () => {
+      const { api, summaryAggregator } = await setupService(false, {
+        responseStreamingMode: "draft",
+      });
+      let telegramDown = true;
+      api.sendMessage.mockImplementation(async (_chatId: number, text: string) => {
+        if (telegramDown && text === "Analysis") {
+          throw new Error("Network request failed");
+        }
+        return { message_id: 100 };
+      });
+
+      await streamDraft(api, summaryAggregator, "Analysis");
+      emitQuestionAsked(summaryAggregator, "q1");
+      await vi.waitFor(() => {
+        expect(indexOfSent(api, "Which option for q1?")).toBeGreaterThanOrEqual(0);
+      });
+
+      telegramDown = false;
+      const failedAttempts = countSent(api, "Analysis");
+      emitAssistantCompleted(summaryAggregator);
+
+      await vi.waitFor(() => {
+        expect(mocked.sendTtsResponseForSession).toHaveBeenCalledTimes(1);
+      });
+      expect(countSent(api, "Analysis")).toBe(failedAttempts + 1);
+      expect(indexOfSent(api, "Which option for q1?")).toBeLessThan(
+        sentMessageTexts(api).lastIndexOf("Analysis"),
+      );
+    });
+
+    it("sends the parent's drafted text above a subagent's permission request", async () => {
+      const { api, summaryAggregator } = await setupService(false, {
+        responseStreamingMode: "draft",
+      });
+
+      await streamDraft(api, summaryAggregator, "Analysis");
+      emitSubagentStart(summaryAggregator);
+      emitPermissionAsked(summaryAggregator, "perm-1", ["D:/shared/*"], "child-session-1");
+
+      await vi.waitFor(() => {
+        expect(indexOfSent(api, "D:/shared/*")).toBeGreaterThanOrEqual(0);
+      });
+      expect(indexOfSent(api, "Analysis")).toBeGreaterThanOrEqual(0);
+      expect(indexOfSent(api, "Analysis")).toBeLessThan(indexOfSent(api, "D:/shared/*"));
+    });
+
+    it("sends the drafted text above the question in compact output mode", async () => {
+      const { api, summaryAggregator } = await setupService(false, {
+        responseStreamingMode: "draft",
+      });
+      const settingsStore = await import("../../../src/app/stores/settings-store.js");
+      settingsStore.setCompactOutputMode(true);
+
+      await streamDraft(api, summaryAggregator, "Analysis");
+      emitQuestionAsked(summaryAggregator, "q1");
+
+      await vi.waitFor(() => {
+        expect(indexOfSent(api, "Which option for q1?")).toBeGreaterThanOrEqual(0);
+      });
+      expect(indexOfSent(api, "Analysis")).toBeGreaterThanOrEqual(0);
+      expect(indexOfSent(api, "Analysis")).toBeLessThan(indexOfSent(api, "Which option for q1?"));
+    });
+
+    it("leaves edit mode as it was: the streamed message stays and is not sent twice", async () => {
+      const { api, summaryAggregator } = await setupService(false, {
+        responseStreamingMode: "edit",
+      });
+
+      emitAssistantTextPart(summaryAggregator, "Analysis");
+      await vi.waitFor(
+        () => {
+          expect(indexOfSent(api, "Analysis")).toBeGreaterThanOrEqual(0);
+        },
+        { timeout: 3000 },
+      );
+      emitQuestionAsked(summaryAggregator, "q1");
+      await vi.waitFor(() => {
+        expect(indexOfSent(api, "Which option for q1?")).toBeGreaterThanOrEqual(0);
+      });
+
+      emitAssistantCompleted(summaryAggregator);
+      await vi.waitFor(() => {
+        expect(mocked.sendTtsResponseForSession).toHaveBeenCalledTimes(1);
+      });
+      expect(countSent(api, "Analysis")).toBe(1);
+      expect(api.sendMessageDraft).not.toHaveBeenCalled();
+    });
   });
 
   it("clears permission prompts when OpenCode resolves pending requests", async () => {

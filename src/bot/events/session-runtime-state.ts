@@ -1,6 +1,7 @@
 import type { SubagentInfo, ToolInfo } from "../../app/managers/summary-aggregation-manager.js";
 import { TOOL_ELAPSED_THRESHOLD_MS } from "../../app/formatters/duration-formatter.js";
 import { ToolMessageBatcher } from "../../app/formatters/tool-message-batcher.js";
+import { logger } from "../../utils/logger.js";
 import {
   getResponseStreamingMode,
   type ResponseStreamingMode,
@@ -29,6 +30,11 @@ type ReplyKeyboard = NonNullable<
 export interface SessionRuntimeStateOptions {
   policy: SessionTargetPolicy;
   getReplyKeyboard: () => ReplyKeyboard | undefined;
+}
+
+export interface UndeliveredAssistantDraft {
+  messageId: string;
+  text: string;
 }
 
 export interface CompactActivity {
@@ -72,6 +78,11 @@ export class SessionRuntimeState {
   private readonly policy: SessionTargetPolicy;
   private runningToolHooks: RunningToolHooks | null = null;
   private readonly assistantStreamModes = new Map<string, ResponseStreamingMode>();
+  // Full text of each streamed reply, and how much of it was already sent
+  // early, before a question or permission prompt. Both are prefixes of the
+  // message's full text.
+  private readonly assistantLatestTexts = new Map<string, string>();
+  private readonly assistantDeliveredTexts = new Map<string, string>();
   private readonly thinkingSections = new Map<string, ThinkingSection[]>();
   private readonly completionTasks = new Map<string, Promise<void>>();
   private readonly runningToolInfos = new Map<string, ToolInfo>();
@@ -206,18 +217,97 @@ export class SessionRuntimeState {
       payload,
       options,
     );
-    this.assistantStreamModes.delete(sessionKey(sessionId, messageId));
+    this.deleteAssistantResponseRecords(sessionId, messageId);
     return result;
   }
 
+  /**
+   * Turns a draft into real messages before the message itself completes.
+   * The stream mode and the text records are kept: the rest of the message
+   * streams in the mode it started in and completion skips what went out.
+   */
+  async completeAssistantDraftEarly(
+    sessionId: string,
+    messageId: string,
+    payload?: StreamingMessagePayload,
+    options?: Parameters<ResponseStreamer["complete"]>[3],
+  ) {
+    this.assistantStreamModes.set(sessionKey(sessionId, messageId), "draft");
+    return this.assistantDraftStreamer.complete(sessionId, messageId, payload, options);
+  }
+
+  recordAssistantText(sessionId: string, messageId: string, text: string): void {
+    this.assistantLatestTexts.set(sessionKey(sessionId, messageId), text);
+  }
+
+  /** Marks a reply's text as sent early; returns what was marked before. */
+  markAssistantTextDelivered(
+    sessionId: string,
+    messageId: string,
+    text: string | undefined,
+  ): string | undefined {
+    const key = sessionKey(sessionId, messageId);
+    const previousText = this.assistantDeliveredTexts.get(key);
+    if (text === undefined) {
+      this.assistantDeliveredTexts.delete(key);
+    } else {
+      this.assistantDeliveredTexts.set(key, text);
+    }
+    return previousText;
+  }
+
+  /** Draft-mode replies of a session with text that has not been sent yet. */
+  getUndeliveredAssistantDrafts(sessionId: string): UndeliveredAssistantDraft[] {
+    const sessionPrefix = `${sessionId}:`;
+    const drafts: UndeliveredAssistantDraft[] = [];
+    for (const [key, text] of this.assistantLatestTexts) {
+      if (!key.startsWith(sessionPrefix)) {
+        continue;
+      }
+
+      const messageId = key.slice(sessionPrefix.length);
+      if (this.getAssistantStreamMode(sessionId, messageId) !== "draft") {
+        continue;
+      }
+
+      if (!this.stripDeliveredAssistantText(sessionId, messageId, text).trim()) {
+        continue;
+      }
+
+      drafts.push({ messageId, text });
+    }
+
+    return drafts;
+  }
+
+  /** The part of a reply's full text that was not sent early. */
+  stripDeliveredAssistantText(sessionId: string, messageId: string, text: string): string {
+    const deliveredText = this.assistantDeliveredTexts.get(sessionKey(sessionId, messageId));
+    if (!deliveredText) {
+      return text;
+    }
+
+    if (!text.startsWith(deliveredText)) {
+      logger.warn(
+        `[Bot] Reply text no longer extends the part sent early, sending it whole: session=${sessionId}, message=${messageId}`,
+      );
+      return text;
+    }
+
+    const remainder = text.slice(deliveredText.length);
+    return remainder.trim() ? remainder : "";
+  }
+
   clearAssistantResponse(sessionId: string, messageId: string, reason: string): void {
-    this.assistantStreamModes.delete(sessionKey(sessionId, messageId));
+    this.deleteAssistantResponseRecords(sessionId, messageId);
     this.assistantEditStreamer.clearMessage(sessionId, messageId, reason);
     this.assistantDraftStreamer.clearMessage(sessionId, messageId, reason);
   }
 
   clearAssistantResponseSession(sessionId: string, reason: string): void {
     deleteSessionKeys(this.assistantStreamModes, sessionId);
+    deleteSessionKeys(this.assistantLatestTexts, sessionId);
+    deleteSessionKeys(this.assistantDeliveredTexts, sessionId);
     this.assistantEditStreamer.clearSession(sessionId, reason);
     this.assistantDraftStreamer.clearSession(sessionId, reason);
   }
@@ -339,6 +429,8 @@ export class SessionRuntimeState {
     this.toolMessageBatcher.clearAll(reason);
     this.toolCallStreamer.clearAll(reason);
     this.assistantStreamModes.clear();
+    this.assistantLatestTexts.clear();
+    this.assistantDeliveredTexts.clear();
     this.assistantEditStreamer.clearAll(reason);
     this.assistantDraftStreamer.clearAll(reason);
     this.thinkingStreamer.clearAll(reason);
@@ -356,6 +448,13 @@ export class SessionRuntimeState {
     this.delivery.resetDraftIds();
     this.clearAllOutput(reason);
     this.completionTasks.clear();
+  }
+
+  private deleteAssistantResponseRecords(sessionId: string, messageId: string): void {
+    const key = sessionKey(sessionId, messageId);
+    this.assistantStreamModes.delete(key);
+    this.assistantLatestTexts.delete(key);
+    this.assistantDeliveredTexts.delete(key);
   }
 
   private getAssistantStreamer(mode: ResponseStreamingMode): ResponseStreamer {
