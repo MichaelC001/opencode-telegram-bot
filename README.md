@@ -172,8 +172,8 @@ The `/messages` command displays all user messages in the current session, sorte
 
 Scheduled tasks let you prepare prompts in advance and run them automatically later or on a recurring schedule. This is useful for periodic checks, routine code maintenance, or tasks you want OpenCode to execute while you are away from your computer. Use `/task` to create a scheduled task and `/tasklist` to review or delete existing ones.
 
-- Each task is created from the currently selected OpenCode project and model
-- Scheduled executions currently always run with the `build` agent
+- Each task is created from the currently selected OpenCode project, model, and agent
+- The agent is fixed when the task is created and every run uses it; it is shown in the creation confirmation and in the task details in `/tasklist`
 - Tasks run outside your active chat session, so they do not interrupt or affect the current session flow
 - The minimum recurring interval is 5 minutes
 - If a recurring task is still running when its next interval arrives, the bot does not start a parallel copy of the same task and does not replay missed intervals later
